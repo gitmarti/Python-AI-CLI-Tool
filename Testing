@@ -1,0 +1,231 @@
+import unittest
+import subprocess
+import sys
+import os
+import time
+from unittest.mock import patch, MagicMock
+from io import StringIO
+
+# Assuming the CLI application is implemented in a file named ollama_cli.py
+# with main functions: list_models() and run_model(model_name, prompt)
+
+class TestOllamaCLI(unittest.TestCase):
+    
+    def setUp(self):
+        # Setup any environment or resources needed before tests
+        # For example, ensure Ollama service is running
+        self.check_ollama_running()
+        
+        # Sample model name that we can use for testing
+        self.test_model = "llama2"  # Assume this model exists
+        
+    def check_ollama_running(self):
+        """Check if Ollama service is running before running tests"""
+        try:
+            result = subprocess.run(["curl", "-s", "http://localhost:11434/api/version"], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                self.skipTest("Ollama service not running. Please start Ollama before running tests.")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            self.skipTest("Ollama service check failed. Please ensure Ollama is installed and running.")
+    
+    # Basic functionality tests
+    
+    def test_list_command_returns_models(self):
+        """Test that the list command returns a list of models"""
+        # Execute the command directly
+        result = subprocess.run(["python", "ollama_cli.py", "list"], 
+                              capture_output=True, text=True)
+        
+        # Check if the command executed successfully
+        self.assertEqual(result.returncode, 0, f"List command failed: {result.stderr}")
+        
+        # Check if the output contains expected text indicating models
+        self.assertIn("Available models", result.stdout)
+    
+    def test_run_command_with_valid_model(self):
+        """Test that the run command works with a valid model and prompt"""
+        # Execute the run command with a short prompt
+        prompt = "Hello, how are you?"
+        result = subprocess.run(
+            ["python", "ollama_cli.py", "run", "--model", self.test_model, "--prompt", prompt],
+            capture_output=True, text=True, timeout=30  # Timeout for long-running AI responses
+        )
+        
+        # Check if the command executed successfully
+        self.assertEqual(result.returncode, 0, f"Run command failed: {result.stderr}")
+        
+        # Check if there is a response (the exact content will vary)
+        self.assertTrue(len(result.stdout) > 0, "No response generated from model")
+    
+    # Edge cases and error handling
+    
+    def test_list_command_when_no_models(self):
+        """Test list command behavior when no models are available"""
+        # Mock the response to simulate no models
+        with patch('subprocess.run') as mock_run:
+            # Configure the mock to return empty list
+            mock_response = MagicMock()
+            mock_response.stdout = '[]'
+            mock_response.returncode = 0
+            mock_run.return_value = mock_response
+            
+            result = subprocess.run(["python", "ollama_cli.py", "list"], 
+                                  capture_output=True, text=True)
+            
+            # Should handle gracefully rather than crash
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("No models found", result.stdout)
+    
+    def test_run_command_with_nonexistent_model(self):
+        """Test that the run command handles nonexistent models gracefully"""
+        fake_model = "nonexistent_model_abc123"
+        prompt = "Hello"
+        
+        result = subprocess.run(
+            ["python", "ollama_cli.py", "run", "--model", fake_model, "--prompt", prompt],
+            capture_output=True, text=True
+        )
+        
+        # Should return an error code
+        self.assertNotEqual(result.returncode, 0)
+        # Should mention the model doesn't exist
+        self.assertIn("not found", result.stderr.lower())
+    
+    def test_run_command_with_empty_prompt(self):
+        """Test that the run command handles empty prompts"""
+        # Execute with empty prompt
+        result = subprocess.run(
+            ["python", "ollama_cli.py", "run", "--model", self.test_model, "--prompt", ""],
+            capture_output=True, text=True
+        )
+        
+        # Check appropriate handling - should either return an error or a message
+        self.assertTrue(
+            "empty prompt" in result.stderr.lower() or 
+            result.returncode != 0 or
+            len(result.stdout) > 0
+        )
+    
+    def test_run_command_with_very_long_prompt(self):
+        """Test that the run command can handle very long prompts"""
+        # Create a prompt that's 10KB in size
+        long_prompt = "This is a test. " * 1000
+        
+        try:
+            # May need longer timeout for large prompts
+            result = subprocess.run(
+                ["python", "ollama_cli.py", "run", "--model", self.test_model, "--prompt", long_prompt],
+                capture_output=True, text=True, timeout=120
+            )
+            
+            # Check if command completed successfully
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(len(result.stdout) > 0)
+            
+        except subprocess.TimeoutExpired:
+            self.fail("Command timed out with very long prompt - potential performance issue")
+    
+    # Performance considerations
+    
+    def test_response_streaming(self):
+        """Test that responses can be streamed for better UX with large outputs"""
+        prompt = "Write a short story about a robot."
+        
+        start_time = time.time()
+        
+        # For this test, we need to check if first output appears quickly
+        # We'll use Popen to monitor output as it arrives
+        with subprocess.Popen(
+            ["python", "ollama_cli.py", "run", "--model", self.test_model, 
+             "--prompt", prompt, "--stream"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1
+        ) as process:
+            
+            # Read first line of output
+            first_line = process.stdout.readline()
+            first_response_time = time.time() - start_time
+            
+            # Clean up process
+            process.terminate()
+            
+            # First response should arrive in under 5 seconds
+            self.assertLess(first_response_time, 5.0, 
+                         "Streaming doesn't show first output quickly")
+            
+            # Should get some actual output
+            self.assertTrue(len(first_line) > 0, "No streaming output received")
+    
+    # Resource handling tests
+    
+    def test_memory_usage(self):
+        """Test that the application doesn't use excessive memory"""
+        import psutil
+        
+        # Get current process
+        current_process = psutil.Process(os.getpid())
+        initial_memory = current_process.memory_info().rss / 1024 / 1024  # in MB
+        
+        # Run a moderately complex query
+        prompt = "Explain quantum computing in simple terms"
+        result = subprocess.run(
+            ["python", "ollama_cli.py", "run", "--model", self.test_model, "--prompt", prompt],
+            capture_output=True, text=True
+        )
+        
+        final_memory = current_process.memory_info().rss / 1024 / 1024  # in MB
+        memory_increase = final_memory - initial_memory
+        
+        # Memory increase should be reasonable (less than 100MB)
+        self.assertLess(memory_increase, 100, 
+                     f"Memory usage increased by {memory_increase}MB, which seems excessive")
+    
+    # Command line interface tests
+    
+    def test_help_command(self):
+        """Test that help command provides useful information"""
+        result = subprocess.run(["python", "ollama_cli.py", "--help"], 
+                              capture_output=True, text=True)
+        
+        self.assertEqual(result.returncode, 0)
+        # Help should mention both main commands
+        self.assertIn("list", result.stdout)
+        self.assertIn("run", result.stdout)
+    
+    def test_invalid_command(self):
+        """Test that invalid commands return appropriate error"""
+        result = subprocess.run(["python", "ollama_cli.py", "invalid_command"], 
+                              capture_output=True, text=True)
+        
+        # Should return non-zero exit code
+        self.assertNotEqual(result.returncode, 0)
+        # Error message should be helpful
+        self.assertIn("invalid choice", result.stderr.lower())
+        
+    # Integration tests
+    
+    def test_multiple_requests(self):
+        """Test sending multiple requests in sequence"""
+        prompts = [
+            "What is Python?",
+            "Write a haiku about programming",
+            "Explain machine learning"
+        ]
+        
+        for prompt in prompts:
+            result = subprocess.run(
+                ["python", "ollama_cli.py", "run", "--model", self.test_model, "--prompt", prompt],
+                capture_output=True, text=True, timeout=30
+            )
+            
+            self.assertEqual(result.returncode, 0, 
+                          f"Request for prompt '{prompt}' failed: {result.stderr}")
+            self.assertTrue(len(result.stdout) > 0, 
+                         f"No response for prompt '{prompt}'")
+
+
+if __name__ == '__main__':
+    unittest.main()

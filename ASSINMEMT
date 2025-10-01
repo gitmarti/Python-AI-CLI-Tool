@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+
+import argparse
+import subprocess
+import json
+import requests
+import sys
+
+class OllamaCLI:
+    def __init__(self):
+        """Initialize the Ollama CLI tool."""
+        self.base_url = "http://localhost:11434/api"
+    
+    def list_models(self):
+        """List all available Ollama models."""
+        try:
+            response = requests.get(f"{self.base_url}/tags")
+            if response.status_code == 200:
+                models = response.json().get('models', [])
+                print("Available models:")
+                for model in models:
+                    print(f"- {model['name']}")
+            else:
+                print(f"Error: Failed to fetch models. Status code: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"Error: Cannot connect to Ollama server: {str(e)}")
+            print("Make sure Ollama is running on your system.")
+    
+    def run_model(self, model_name, prompt):
+        """Send a prompt to the specified model and display the response."""
+        try:
+            data = {
+                "model": model_name,
+                "prompt": prompt
+            }
+            
+            response = requests.post(f"{self.base_url}/generate", json=data, stream=True)
+            
+            if response.status_code == 200:
+                full_response = ""
+                # Process the streaming response
+                for line in response.iter_lines():
+                    if line:
+                        chunk = json.loads(line)
+                        if 'response' in chunk:
+                            sys.stdout.write(chunk['response'])
+                            sys.stdout.flush()
+                            full_response += chunk['response']
+                        
+                        # Break if done
+                        if chunk.get('done', False):
+                            break
+                print()  # Add a newline at the end
+            else:
+                print(f"Error: Failed to get response. Status code: {response.status_code}")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Error: Cannot connect to Ollama server: {str(e)}")
+            print("Make sure Ollama is running on your system.")
+        except json.JSONDecodeError:
+            print("Error: Invalid response from server")
+
+def main():
+    """Main function to parse arguments and execute commands."""
+    parser = argparse.ArgumentParser(description="CLI tool to interact with Ollama AI models")
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+    
+    # List command
+    list_parser = subparsers.add_parser("list", help="List all available models")
+    
+    # Run command
+    run_parser = subparsers.add_parser("run", help="Run a prompt on a specified model")
+    run_parser.add_argument("model", help="Name of the model to use")
+    run_parser.add_argument("prompt", help="Prompt to send to the model")
+    
+    args = parser.parse_args()
+    
+    ollama_cli = OllamaCLI()
+    
+    if args.command == "list":
+        ollama_cli.list_models()
+    elif args.command == "run":
+        ollama_cli.run_model(args.model, args.prompt)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
